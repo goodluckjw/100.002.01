@@ -177,6 +177,54 @@ def extract_chunk_and_josa(token, searchword):
     # 기본 반환 - 토큰 전체
     return token, None, None
 
+def preprocess_search_term(search_term):
+    """검색어를 전처리하는 함수"""
+    # 큰따옴표로 묶인 문자열인지 확인
+    if search_term.startswith('"') and search_term.endswith('"'):
+        # 따옴표 제거하고 구문으로 처리
+        return search_term[1:-1], True
+    else:
+        # 일반 단어로 처리
+        return search_term, False
+
+def find_phrase_with_josa(text, phrase):
+    """공백 포함 문자열과 그 뒤의 조사를 찾는 함수"""
+    matches = []
+    start_pos = 0
+    
+    while True:
+        # 구문 위치 찾기
+        pos = text.find(phrase, start_pos)
+        if pos == -1:
+            break
+        
+        # 구문 끝 위치
+        end_pos = pos + len(phrase)
+        
+        # 조사가 있는지 확인 (구문 뒤 1-4글자)
+        max_josa_len = min(4, len(text) - end_pos)
+        potential_josa = text[end_pos:end_pos + max_josa_len]
+        
+        # 조사 후보 리스트
+        josa_candidates = ["을", "를", "과", "와", "이", "가", "은", "는", 
+                          "이나", "나", "으로", "로", "로서", "으로서", "로써", "으로써"]
+        
+        found_josa = None
+        
+        # 가장 긴 조사부터 확인
+        for josa in sorted(josa_candidates, key=len, reverse=True):
+            if potential_josa.startswith(josa):
+                found_josa = josa
+                break
+        
+        # 구문과 조사 정보 추가
+        matches.append((pos, phrase, found_josa))
+        
+        # 다음 검색 시작 위치
+        start_pos = pos + 1
+    
+    return matches
+
 def apply_josa_rule(orig, replaced, josa):
     """개정문 조사 규칙에 따라 적절한 형식 반환"""
     # 동일한 단어면 변경할 필요 없음
@@ -567,10 +615,14 @@ def run_amendment_logic(find_word, replace_word):
     amendment_results = []
     skipped_laws = []  # 디버깅을 위해 누락된 법률 추적
     
+    # 새로 추가: 검색어 전처리
+    processed_find_word, is_phrase = preprocess_search_term(find_word)
+    processed_replace_word, _ = preprocess_search_term(replace_word)
+    
     # 부칙 정보 확인을 위한 변수
     부칙_검색됨 = False  # 부칙에서 검색어가 발견되었는지 여부
     
-    laws = get_law_list_from_api(find_word)
+    laws = get_law_list_from_api(processed_find_word)
     print(f"총 {len(laws)}개 법률이 검색되었습니다.")
     
     # 실제로 출력된 법률을 추적하기 위한 변수
@@ -618,11 +670,21 @@ def run_amendment_logic(find_word, replace_word):
             
             # 조문 제목 검색 (추가)
             조문제목 = article.findtext("조문제목", "") or ""
-            제목에_검색어_있음 = find_word in 조문제목
+            
+            # 수정: 구문/단어에 따라 다른 검색 방식 적용
+            if is_phrase:
+                제목에_검색어_있음 = processed_find_word in 조문제목
+            else:
+                제목에_검색어_있음 = processed_find_word in 조문제목
             
             # 조문내용에서 검색
             조문내용 = article.findtext("조문내용", "") or ""
-            본문에_검색어_있음 = find_word in 조문내용
+            
+            # 수정: 구문/단어에 따라 다른 검색 방식 적용
+            if is_phrase:
+                본문에_검색어_있음 = processed_find_word in 조문내용
+            else:
+                본문에_검색어_있음 = processed_find_word in 조문내용
             
             if 제목에_검색어_있음 or 본문에_검색어_있음:
                 found_matches += 1
@@ -637,25 +699,43 @@ def run_amendment_logic(find_word, replace_word):
                 elif 제목에_검색어_있음:
                     location_suffix = " 제목"
                 
-                # 제목 검색어만 처리하도록 수정
+                # 수정: 제목에서 구문/단어 검색 방식 분기
                 if 제목에_검색어_있음:
-                      tokens = re.findall(r'[가-힣A-Za-z0-9]+', 조문제목)
-                      for token in tokens:
-                          if find_word in token:
-                               chunk, josa, suffix = extract_chunk_and_josa(token, find_word)
-                               replaced = chunk.replace(find_word, replace_word)
-                               location = f"{조문식별자} 제목"
-                               chunk_map[(chunk, replaced, josa, suffix)].append(location)
-                    # 제목에 검색어가 있는 경우 본문은 처리하지 않음
+                    if is_phrase:
+                        # 공백 포함 구문 처리
+                        phrase_matches = find_phrase_with_josa(조문제목, processed_find_word)
+                        for _, phrase, josa in phrase_matches:
+                            location = f"{조문식별자} 제목"
+                            chunk_map[(processed_find_word, processed_replace_word, josa, None)].append(location)
+                    else:
+                        # 단어 단위 처리 (기존 방식)
+                        tokens = re.findall(r'[가-힣A-Za-z0-9]+', 조문제목)
+                        for token in tokens:
+                            if processed_find_word in token:
+                                chunk, josa, suffix = extract_chunk_and_josa(token, processed_find_word)
+                                replaced = chunk.replace(processed_find_word, processed_replace_word)
+                                location = f"{조문식별자} 제목"
+                                chunk_map[(chunk, replaced, josa, suffix)].append(location)
+                
+                # 수정: 본문에서 구문/단어 검색 방식 분기
                 elif 본문에_검색어_있음:  # elif로 변경하여 중복 검색 방지
-                     print(f"매치 발견: {조문식별자}")
-                     tokens = re.findall(r'[가-힣A-Za-z0-9]+', 조문내용)
-                     for token in tokens:
-                        if find_word in token:
-                           chunk, josa, suffix = extract_chunk_and_josa(token, find_word)
-                           replaced = chunk.replace(find_word, replace_word)
-                           location = f"{조문식별자}"
-                           chunk_map[(chunk, replaced, josa, suffix)].append(location)
+                    print(f"매치 발견: {조문식별자}")
+                    
+                    if is_phrase:
+                        # 공백 포함 구문 처리
+                        phrase_matches = find_phrase_with_josa(조문내용, processed_find_word)
+                        for _, phrase, josa in phrase_matches:
+                            location = f"{조문식별자}"
+                            chunk_map[(processed_find_word, processed_replace_word, josa, None)].append(location)
+                    else:
+                        # 단어 단위 처리 (기존 방식)
+                        tokens = re.findall(r'[가-힣A-Za-z0-9]+', 조문내용)
+                        for token in tokens:
+                            if processed_find_word in token:
+                                chunk, josa, suffix = extract_chunk_and_josa(token, processed_find_word)
+                                replaced = chunk.replace(processed_find_word, processed_replace_word)
+                                location = f"{조문식별자}"
+                                chunk_map[(chunk, replaced, josa, suffix)].append(location)
 
             # 항 내용 검색
             for 항 in article.findall("항"):
@@ -671,7 +751,14 @@ def run_amendment_logic(find_word, replace_word):
                         break
                 
                 항내용 = 항.findtext("항내용", "") or ""
-                if find_word in 항내용:
+                
+                # 수정: 구문/단어에 따라 다른 검색 방식 적용
+                if is_phrase:
+                    항_검색어_있음 = processed_find_word in 항내용
+                else:
+                    항_검색어_있음 = processed_find_word in 항내용
+                
+                if 항_검색어_있음:
                     found_matches += 1
                     if is_부칙:
                         found_in_부칙 = True
@@ -682,13 +769,22 @@ def run_amendment_logic(find_word, replace_word):
                         additional_info = " 각 목 외의 부분"
                         
                     print(f"매치 발견: {조문식별자}{항번호_부분}{additional_info}")
-                    tokens = re.findall(r'[가-힣A-Za-z0-9]+', 항내용)
-                    for token in tokens:
-                        if find_word in token:
-                            chunk, josa, suffix = extract_chunk_and_josa(token, find_word)
-                            replaced = chunk.replace(find_word, replace_word)
+                    
+                    if is_phrase:
+                        # 공백 포함 구문 처리
+                        phrase_matches = find_phrase_with_josa(항내용, processed_find_word)
+                        for _, phrase, josa in phrase_matches:
                             location = f"{조문식별자}{항번호_부분}{additional_info}"
-                            chunk_map[(chunk, replaced, josa, suffix)].append(location)
+                            chunk_map[(processed_find_word, processed_replace_word, josa, None)].append(location)
+                    else:
+                        # 단어 단위 처리 (기존 방식)
+                        tokens = re.findall(r'[가-힣A-Za-z0-9]+', 항내용)
+                        for token in tokens:
+                            if processed_find_word in token:
+                                chunk, josa, suffix = extract_chunk_and_josa(token, processed_find_word)
+                                replaced = chunk.replace(processed_find_word, processed_replace_word)
+                                location = f"{조문식별자}{항번호_부분}{additional_info}"
+                                chunk_map[(chunk, replaced, josa, suffix)].append(location)
                 
                 # 호 내용 검색
                 for 호 in 항.findall("호"):
@@ -701,7 +797,14 @@ def run_amendment_logic(find_word, replace_word):
                         호가지번호 = 호.findtext("호가지번호", "").strip()
                     
                     호내용 = 호.findtext("호내용", "") or ""
-                    if find_word in 호내용:
+                    
+                    # 수정: 구문/단어에 따라 다른 검색 방식 적용
+                    if is_phrase:
+                        호_검색어_있음 = processed_find_word in 호내용
+                    else:
+                        호_검색어_있음 = processed_find_word in 호내용
+                    
+                    if 호_검색어_있음:
                         found_matches += 1
                         if is_부칙:
                             found_in_부칙 = True
@@ -713,13 +816,22 @@ def run_amendment_logic(find_word, replace_word):
                             호번호_표시 = f"제{호번호}호의{호가지번호}"
                             
                         print(f"매치 발견: {조문식별자}{항번호_부분}{호번호_표시}")
-                        tokens = re.findall(r'[가-힣A-Za-z0-9]+', 호내용)
-                        for token in tokens:
-                            if find_word in token:
-                                chunk, josa, suffix = extract_chunk_and_josa(token, find_word)
-                                replaced = chunk.replace(find_word, replace_word)
+                        
+                        if is_phrase:
+                            # 공백 포함 구문 처리
+                            phrase_matches = find_phrase_with_josa(호내용, processed_find_word)
+                            for _, phrase, josa in phrase_matches:
                                 location = f"{조문식별자}{항번호_부분}{호번호_표시}"
-                                chunk_map[(chunk, replaced, josa, suffix)].append(location)
+                                chunk_map[(processed_find_word, processed_replace_word, josa, None)].append(location)
+                        else:
+                            # 단어 단위 처리 (기존 방식)
+                            tokens = re.findall(r'[가-힣A-Za-z0-9]+', 호내용)
+                            for token in tokens:
+                                if processed_find_word in token:
+                                    chunk, josa, suffix = extract_chunk_and_josa(token, processed_find_word)
+                                    replaced = chunk.replace(processed_find_word, processed_replace_word)
+                                    location = f"{조문식별자}{항번호_부분}{호번호_표시}"
+                                    chunk_map[(chunk, replaced, josa, suffix)].append(location)
 
                     # 목 내용 검색
                     for 목 in 호.findall("목"):
@@ -727,8 +839,14 @@ def run_amendment_logic(find_word, replace_word):
                         for m in 목.findall("목내용"):
                             if not m.text:
                                 continue
+                            
+                            # 수정: 구문/단어에 따라 다른 검색 방식 적용
+                            if is_phrase:
+                                목_검색어_있음 = processed_find_word in m.text
+                            else:
+                                목_검색어_있음 = processed_find_word in m.text
                                 
-                            if find_word in m.text:
+                            if 목_검색어_있음:
                                 found_matches += 1
                                 if is_부칙:
                                     found_in_부칙 = True
@@ -740,16 +858,27 @@ def run_amendment_logic(find_word, replace_word):
                                     호번호_표시 = f"제{호번호}호의{호가지번호}"
                                     
                                 print(f"매치 발견: {조문식별자}{항번호_부분}{호번호_표시}{목번호}목")
-                                줄들 = [line.strip() for line in m.text.splitlines() if line.strip()]
-                                for 줄 in 줄들:
-                                    if find_word in 줄:
-                                        tokens = re.findall(r'[가-힣A-Za-z0-9]+', 줄)
-                                        for token in tokens:
-                                            if find_word in token:
-                                                chunk, josa, suffix = extract_chunk_and_josa(token, find_word)
-                                                replaced = chunk.replace(find_word, replace_word)
+                                
+                                if is_phrase:
+                                    # 공백 포함 구문 처리
+                                    for line in m.text.splitlines():
+                                        if processed_find_word in line:
+                                            phrase_matches = find_phrase_with_josa(line, processed_find_word)
+                                            for _, phrase, josa in phrase_matches:
                                                 location = f"{조문식별자}{항번호_부분}{호번호_표시}{목번호}목"
-                                                chunk_map[(chunk, replaced, josa, suffix)].append(location)
+                                                chunk_map[(processed_find_word, processed_replace_word, josa, None)].append(location)
+                                else:
+                                    # 단어 단위 처리 (기존 방식)
+                                    줄들 = [line.strip() for line in m.text.splitlines() if line.strip()]
+                                    for 줄 in 줄들:
+                                        if processed_find_word in 줄:
+                                            tokens = re.findall(r'[가-힣A-Za-z0-9]+', 줄)
+                                            for token in tokens:
+                                                if processed_find_word in token:
+                                                    chunk, josa, suffix = extract_chunk_and_josa(token, processed_find_word)
+                                                    replaced = chunk.replace(processed_find_word, processed_replace_word)
+                                                    location = f"{조문식별자}{항번호_부분}{호번호_표시}{목번호}목"
+                                                    chunk_map[(chunk, replaced, josa, suffix)].append(location)
 
         # 검색 결과가 없으면 다음 법률로
         if not chunk_map:
